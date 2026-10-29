@@ -20,6 +20,8 @@ enemies, and a Warden that hits harder and survives longer.
 - Your weapon targets the nearest enemy and fires automatically. Hold `Space`
 	to fire faster on desktop. Eliminations unlock weapons during each run:
 	the service pistol, burst rifle, scattergun, grenade launcher, and bazooka.
+	Projectiles lead moving targets, and visible hit flashes and health bars confirm
+	damage. Enemies physically separate instead of piling into one another.
 	Explosive rounds damage groups around their impact. Ranged enemies telegraph aimed volleys; keep moving
 	to dodge their spreading shots and the fast red Stalkers. Enemies arrive outside
 	the camera view, with reinforcements continuing through most of each wave.

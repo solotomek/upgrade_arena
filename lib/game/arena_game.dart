@@ -18,6 +18,7 @@ enum UpgradeType {
   regen,
   critical,
 }
+
 enum PickupType { coin, surge, force, repair }
 
 enum _EnemyType { stalker, gunner, charger, bomber, weaver, sentinel }
@@ -70,6 +71,11 @@ class GameSnapshot {
     if (forceSeconds > 0) return 'FORCE';
     return null;
   }
+}
+
+void _damageEnemy(_Enemy enemy, double amount) {
+  enemy.health -= amount;
+  enemy.hitFlash = 0.18;
 }
 
 class GameCore extends FlameGame with KeyboardEvents {
@@ -150,6 +156,20 @@ class GameCore extends FlameGame with KeyboardEvents {
       math.min(36, 18 + sectorIndex * 2 + _threatTier * 2);
   List<Vector2> get enemyPositions =>
       _enemies.map((enemy) => enemy.position.clone()).toList();
+  double get minimumEnemyClearance {
+    var minimumClearance = double.infinity;
+    for (var first = 0; first < _enemies.length; first++) {
+      for (var second = first + 1; second < _enemies.length; second++) {
+        final clearance =
+            _enemies[first].position.distanceTo(_enemies[second].position) -
+            _enemies[first].radius -
+            _enemies[second].radius;
+        minimumClearance = math.min(minimumClearance, clearance);
+      }
+    }
+    return minimumClearance;
+  }
+
   Set<String> get enemyTypesSpawned =>
       _enemyTypesSpawned.map((type) => type.name).toSet();
   bool isInsideCameraView(Vector2 point, {double margin = 0}) =>
@@ -410,14 +430,15 @@ class GameCore extends FlameGame with KeyboardEvents {
     _movePlayer(step);
     _fire(step);
     _spawnReinforcements(step);
+    for (final enemy in _enemies) {
+      enemy.hitFlash = math.max(0, enemy.hitFlash - step);
+    }
     _moveEnemies(step);
     _moveBullets(step);
     _moveEnemyBullets(step);
     _collectPickups(step);
 
-    if (_enemies.isEmpty &&
-        _remainingSpawns == 0 &&
-        _pendingWaveBosses > 0) {
+    if (_enemies.isEmpty && _remainingSpawns == 0 && _pendingWaveBosses > 0) {
       _spawnWaveBoss();
     }
 
@@ -514,30 +535,46 @@ class GameCore extends FlameGame with KeyboardEvents {
       (enemy) => _hasClearShot(_player, enemy.position),
       orElse: () => targets.first,
     );
-    final aim = target.position - _player;
+    final aimProjectileSpeed = _weaponProjectileSpeed(currentWeapon);
+    final flightTime =
+        (target.position.distanceTo(_player) / aimProjectileSpeed)
+            .clamp(0.0, 0.65)
+            .toDouble();
+    final predictedPosition = target.position + target.velocity * flightTime;
+    final aimTarget = _hasClearShot(_player, predictedPosition)
+        ? predictedPosition
+        : target.position;
+    final aim = aimTarget - _player;
     if (aim.length2 == 0) return;
     aim.normalize();
 
     final weapon = currentWeapon;
-    final (shots, damage, spread, projectileSpeed, blastRadius, cooldown) =
-        switch (weapon) {
-          ArenaWeapon.sidearm => (1, 18.0, 0.0, 570.0, 0.0, 0.43),
-          ArenaWeapon.burst => (3, 12.0, 0.075, 600.0, 0.0, 0.42),
-          ArenaWeapon.scattergun => (5, 9.0, 0.21, 500.0, 0.0, 0.72),
-          ArenaWeapon.grenadeLauncher => (1, 42.0, 0.0, 340.0, 78.0, 0.88),
-          ArenaWeapon.bazooka => (1, 78.0, 0.0, 430.0, 118.0, 1.05),
-        };
+    final (
+      shots,
+      damage,
+      spread,
+      projectileSpeed,
+      blastRadius,
+      cooldown,
+    ) = switch (weapon) {
+      ArenaWeapon.sidearm => (1, 36.0, 0.0, 620.0, 0.0, 0.28),
+      ArenaWeapon.burst => (3, 16.0, 0.075, 640.0, 0.0, 0.38),
+      ArenaWeapon.scattergun => (5, 12.0, 0.21, 530.0, 0.0, 0.62),
+      ArenaWeapon.grenadeLauncher => (1, 42.0, 0.0, 340.0, 78.0, 0.88),
+      ArenaWeapon.bazooka => (1, 78.0, 0.0, 430.0, 118.0, 1.05),
+    };
     final criticalMultiplier =
         _random.nextDouble() < level(UpgradeType.critical) * 0.07 ? 2.0 : 1.0;
     for (var index = 0; index < shots; index++) {
-      final angle = math.atan2(aim.y, aim.x) +
-          _spreadOffset(index, shots, spread);
+      final angle =
+          math.atan2(aim.y, aim.x) + _spreadOffset(index, shots, spread);
       final direction = Vector2(math.cos(angle), math.sin(angle));
       _bullets.add(
         _Bullet(
           position: _player + direction * 22,
           velocity: direction * projectileSpeed,
-          damage: (damage + level(UpgradeType.power) * 7) *
+          damage:
+              (damage + level(UpgradeType.power) * 7) *
               (_forceTimer > 0 ? 1.8 : 1.0) *
               criticalMultiplier,
           blastRadius: blastRadius,
@@ -561,8 +598,20 @@ class GameCore extends FlameGame with KeyboardEvents {
     return (index.isOdd ? -radius : radius) * spread;
   }
 
+  double _weaponProjectileSpeed(ArenaWeapon weapon) => switch (weapon) {
+    ArenaWeapon.sidearm => 620,
+    ArenaWeapon.burst => 640,
+    ArenaWeapon.scattergun => 530,
+    ArenaWeapon.grenadeLauncher => 340,
+    ArenaWeapon.bazooka => 430,
+  };
+
   void _moveEnemies(double dt) {
+    final previousPositions = {
+      for (final enemy in _enemies) enemy: enemy.position.clone(),
+    };
     for (final enemy in _enemies) {
+      enemy.velocity.setZero();
       final towardPlayer = _player - enemy.position;
       final distance = towardPlayer.length;
       if (enemy.type == _EnemyType.charger) {
@@ -667,6 +716,95 @@ class GameCore extends FlameGame with KeyboardEvents {
         }
       }
     }
+    _resolveEnemyOverlaps();
+    if (dt > 0) {
+      for (final enemy in _enemies) {
+        enemy.velocity.setFrom(
+          (enemy.position - previousPositions[enemy]!) / dt,
+        );
+      }
+    }
+  }
+
+  void _resolveEnemyOverlaps() {
+    const clearance = 4.0;
+    const candidateAngles = [0.0, 0.55, -0.55, 1.1, -1.1, 1.65, -1.65];
+    for (var pass = 0; pass < 8; pass++) {
+      for (var firstIndex = 0; firstIndex < _enemies.length; firstIndex++) {
+        final first = _enemies[firstIndex];
+        for (
+          var secondIndex = firstIndex + 1;
+          secondIndex < _enemies.length;
+          secondIndex++
+        ) {
+          final second = _enemies[secondIndex];
+          final offset = second.position - first.position;
+          final distance = offset.length;
+          final requiredDistance = first.radius + second.radius + clearance;
+          if (distance >= requiredDistance) continue;
+
+          final direction = distance > 0.001
+              ? offset / distance
+              : Vector2(
+                  math.cos((firstIndex * 17 + secondIndex * 31).toDouble()),
+                  math.sin((firstIndex * 17 + secondIndex * 31).toDouble()),
+                );
+          final pushDistance = requiredDistance - distance;
+          var separated = false;
+          for (final angle in candidateAngles) {
+            final candidateDirection = Vector2(
+              direction.x * math.cos(angle) - direction.y * math.sin(angle),
+              direction.x * math.sin(angle) + direction.y * math.cos(angle),
+            );
+            final firstPosition =
+                first.position - candidateDirection * (pushDistance / 2);
+            final secondPosition =
+                second.position + candidateDirection * (pushDistance / 2);
+            if (_hitsObstacle(firstPosition, first.radius) ||
+                _hitsObstacle(secondPosition, second.radius)) {
+              continue;
+            }
+            first.position.setFrom(firstPosition);
+            second.position.setFrom(secondPosition);
+            separated = true;
+            break;
+          }
+          if (separated) continue;
+
+          for (final angle in candidateAngles) {
+            final candidateDirection = Vector2(
+              direction.x * math.cos(angle) - direction.y * math.sin(angle),
+              direction.x * math.sin(angle) + direction.y * math.cos(angle),
+            );
+            final candidate =
+                second.position + candidateDirection * pushDistance;
+            if (_hitsObstacle(candidate, second.radius) ||
+                candidate.distanceTo(first.position) < requiredDistance) {
+              continue;
+            }
+            second.position.setFrom(candidate);
+            separated = true;
+            break;
+          }
+          if (separated) continue;
+
+          for (final angle in candidateAngles) {
+            final candidateDirection = Vector2(
+              direction.x * math.cos(angle) - direction.y * math.sin(angle),
+              direction.x * math.sin(angle) + direction.y * math.cos(angle),
+            );
+            final candidate =
+                first.position - candidateDirection * pushDistance;
+            if (_hitsObstacle(candidate, first.radius) ||
+                candidate.distanceTo(second.position) < requiredDistance) {
+              continue;
+            }
+            first.position.setFrom(candidate);
+            break;
+          }
+        }
+      }
+    }
   }
 
   void _fireEnemyVolley(
@@ -759,18 +897,23 @@ class GameCore extends FlameGame with KeyboardEvents {
     return true;
   }
 
-  void _seekClearFiringPosition(_Enemy enemy, double preferredRange, double dt) {
+  void _seekClearFiringPosition(
+    _Enemy enemy,
+    double preferredRange,
+    double dt,
+  ) {
     Vector2? bestPosition;
     var bestScore = double.infinity;
     for (var index = 0; index < 24; index++) {
       final angle = index * math.pi * 2 / 24;
-      final candidate = _player +
-          Vector2(math.cos(angle), math.sin(angle)) * preferredRange;
+      final candidate =
+          _player + Vector2(math.cos(angle), math.sin(angle)) * preferredRange;
       if (_hitsObstacle(candidate, enemy.radius) ||
           !_hasClearShot(candidate, _player)) {
         continue;
       }
-      final score = candidate.distanceTo(enemy.position) +
+      final score =
+          candidate.distanceTo(enemy.position) +
           (_visibleWorldRect.contains(Offset(candidate.x, candidate.y))
               ? 90
               : 0);
@@ -841,7 +984,11 @@ class GameCore extends FlameGame with KeyboardEvents {
       final previousPosition = bullet.position.clone();
       bullet.position.add(bullet.velocity * dt);
       bullet.life -= dt;
-      final contact = _firstObstacleContact(previousPosition, bullet.position, 3);
+      final contact = _firstObstacleContact(
+        previousPosition,
+        bullet.position,
+        3,
+      );
       final outsideArena =
           bullet.position.x < 0 ||
           bullet.position.y < 0 ||
@@ -875,14 +1022,15 @@ class GameCore extends FlameGame with KeyboardEvents {
           for (final enemy in _enemies) {
             if (detonationPoint.distanceTo(enemy.position) <=
                 bullet.blastRadius + enemy.radius) {
-              enemy.health -= bullet.damage;
+              _damageEnemy(enemy, bullet.damage);
               if (enemy.health <= 0) defeatedEnemies.add(enemy);
             }
           }
         } else {
           for (final enemy in _enemies) {
-            if (detonationPoint.distanceTo(enemy.position) <= enemy.radius + 4) {
-              enemy.health -= bullet.damage;
+            if (detonationPoint.distanceTo(enemy.position) <=
+                enemy.radius + 4) {
+              _damageEnemy(enemy, bullet.damage);
               if (enemy.health <= 0) defeatedEnemies.add(enemy);
               break;
             }
@@ -967,8 +1115,7 @@ class GameCore extends FlameGame with KeyboardEvents {
           bullet.position.y < 0 ||
           bullet.position.x > arenaWidth ||
           bullet.position.y > arenaHeight;
-      if (bullet.life <= 0 ||
-          outsideArena) {
+      if (bullet.life <= 0 || outsideArena) {
         spentBullets.add(bullet);
       }
     }
@@ -1053,9 +1200,7 @@ class GameCore extends FlameGame with KeyboardEvents {
       0.32,
       0.72 - sectorIndex * 0.035 - _threatTier * 0.025,
     );
-    _spawnCooldown = isFinalWave
-        ? math.max(0.55, interval * 1.35)
-        : interval;
+    _spawnCooldown = isFinalWave ? math.max(0.55, interval * 1.35) : interval;
   }
 
   void _spawnWaveBoss() {
@@ -1107,7 +1252,7 @@ class GameCore extends FlameGame with KeyboardEvents {
     final type = _nextEnemyType();
     final position = _randomOffscreenFreePoint(radius: elite ? 19 : 13);
     final difficulty = 1 + _threatTier * 0.18 + sectorIndex * 0.025;
-    final health = (48 + _wave * 10 + (elite ? 55 : 0)) * difficulty;
+    final health = (30 + _wave * 4 + (elite ? 30 : 0)) * difficulty;
     _enemies.add(
       _Enemy(
         position: position,
@@ -1165,7 +1310,8 @@ class GameCore extends FlameGame with KeyboardEvents {
       );
       if (offscreenBounds.contains(Offset(point.x, point.y)) ||
           _hitsObstacle(point, radius) ||
-          point.distanceTo(_player) < 280) {
+          point.distanceTo(_player) < 280 ||
+          !_hasEnemyClearance(point, radius)) {
         continue;
       }
       return point;
@@ -1181,12 +1327,21 @@ class GameCore extends FlameGame with KeyboardEvents {
       point.x = point.x.clamp(radius, arenaWidth - radius).toDouble();
       point.y = point.y.clamp(radius, arenaHeight - radius).toDouble();
       if (!offscreenBounds.contains(Offset(point.x, point.y)) &&
-          !_hitsObstacle(point, radius)) {
+          !_hitsObstacle(point, radius) &&
+          _hasEnemyClearance(point, radius)) {
         return point;
       }
     }
+    for (var attempt = 0; attempt < 120; attempt++) {
+      final point = _randomFreePoint(minimumPlayerDistance: 450);
+      if (_hasEnemyClearance(point, radius)) return point;
+    }
     return _randomFreePoint(minimumPlayerDistance: 450);
   }
+
+  bool _hasEnemyClearance(Vector2 point, double radius) => _enemies.every(
+    (enemy) => point.distanceTo(enemy.position) >= radius + enemy.radius + 3,
+  );
 
   void _spawnSupply() {
     final choices = [PickupType.surge, PickupType.force, PickupType.repair];
@@ -1806,6 +1961,26 @@ class GameCore extends FlameGame with KeyboardEvents {
         }
       }
 
+      if (enemy.hitFlash > 0) {
+        final progress = 1 - enemy.hitFlash / 0.18;
+        canvas.drawCircle(
+          center,
+          enemy.radius + 3 + progress * 8,
+          Paint()
+            ..color = const Color(0xFFFFF2CA)
+                .withAlpha((enemy.hitFlash / 0.18 * 230).round())
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3,
+        );
+        canvas.drawCircle(
+          center,
+          enemy.radius * 0.55,
+          Paint()
+            ..color = const Color(0xFFFFD166)
+                .withAlpha((enemy.hitFlash / 0.18 * 65).round()),
+        );
+      }
+
       if (isRanged && enemy.attackCooldown < 0.7) {
         final charge = (1 - enemy.attackCooldown / 0.7).clamp(0, 1);
         canvas.drawCircle(
@@ -1824,10 +1999,10 @@ class GameCore extends FlameGame with KeyboardEvents {
         );
       }
       final bar = Rect.fromLTWH(
-        enemy.position.x - enemy.radius,
+        enemy.position.x - math.max(16.0, enemy.radius),
         enemy.position.y - enemy.radius - 9,
-        enemy.radius * 2,
-        3,
+        math.max(32.0, enemy.radius * 2),
+        5,
       );
       canvas.drawRect(bar, Paint()..color = const Color(0xFF452B27));
       canvas.drawRect(
@@ -1844,16 +2019,25 @@ class GameCore extends FlameGame with KeyboardEvents {
 
   void _drawBullets(Canvas canvas) {
     for (final bullet in _bullets) {
+      final center = Offset(bullet.position.x, bullet.position.y);
+      final direction = bullet.velocity;
+      final length = direction.length;
+      if (length > 0) {
+        canvas.drawLine(
+          center - Offset(direction.x / length, direction.y / length) * 13,
+          center,
+          Paint()
+            ..color = const Color(0xFFFFAD42).withAlpha(210)
+            ..strokeWidth = bullet.heavy ? 6 : 3
+            ..strokeCap = StrokeCap.round,
+        );
+      }
       canvas.drawCircle(
-        Offset(bullet.position.x, bullet.position.y),
-        5,
-        Paint()..color = gold,
+        center,
+        bullet.heavy ? 7 : 5,
+        Paint()..color = const Color(0xFFFFAD42),
       );
-      canvas.drawCircle(
-        Offset(bullet.position.x, bullet.position.y),
-        2,
-        Paint()..color = const Color(0xFFFFF2CA),
-      );
+      canvas.drawCircle(center, 2.5, Paint()..color = const Color(0xFFFFF2CA));
     }
     for (final bullet in _enemyBullets) {
       final center = Offset(bullet.position.x, bullet.position.y);
@@ -1952,11 +2136,8 @@ class GameCore extends FlameGame with KeyboardEvents {
     bossHealth: _activeBoss?.health ?? 0,
     bossMaxHealth:
         _activeBoss?.maxHealth ??
-        (_pendingWaveBosses > 0 && _wave % 12 == 0
-            ? _waveBossHealth(true)
-            : 0),
-    remainingThreats:
-        _enemies.length + _remainingSpawns + _pendingWaveBosses,
+        (_pendingWaveBosses > 0 && _wave % 12 == 0 ? _waveBossHealth(true) : 0),
+    remainingThreats: _enemies.length + _remainingSpawns + _pendingWaveBosses,
     threatTier: _threatTier,
   );
 
@@ -2037,9 +2218,11 @@ class _Enemy {
   final bool elite;
   final _EnemyType type;
   final bool boss;
+  final Vector2 velocity = Vector2.zero();
   double health;
   double attackCooldown;
   double chargeCooldown;
+  double hitFlash = 0;
   double chargeTimer = 0;
   int orbitDirection = 1;
   bool charging = false;

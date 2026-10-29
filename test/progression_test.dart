@@ -216,6 +216,27 @@ void main() {
     game.snapshot.dispose();
   });
 
+  test(
+    'first-wave enemies stay separated and the pistol earns early kills',
+    () {
+      final game = GameCore(onSave: (wallet, levels, threatTier) async {});
+      game.onGameResize(Vector2(640, 480));
+      game.beginRun();
+
+      for (
+        var step = 0;
+        step < 300 && game.snapshot.value.phase == RunPhase.playing;
+        step++
+      ) {
+        game.update(0.05);
+        expect(game.minimumEnemyClearance, greaterThanOrEqualTo(3.9));
+      }
+
+      expect(game.kills, greaterThanOrEqualTo(2));
+      game.snapshot.dispose();
+    },
+  );
+
   test('an unattended pilot can be overwhelmed by an ascension wave', () {
     final game = GameCore(onSave: (wallet, levels, threatTier) async {});
     game.restoreProgress(0, {}, threatTier: 5);
