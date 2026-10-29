@@ -237,6 +237,55 @@ void main() {
     },
   );
 
+  test('swept projectile hitbox returns the actual circle entry point', () {
+    final contact = GameCore.segmentCircleContact(
+      Vector2.zero(),
+      Vector2(100, 0),
+      Vector2(50, 8),
+      10,
+    );
+
+    expect(contact, isNotNull);
+    expect(contact!.$1, closeTo(0.44, 0.0001));
+    expect(contact.$2.distanceTo(Vector2(50, 8)), closeTo(10, 0.0001));
+    expect(
+      GameCore.segmentCircleContact(
+        Vector2.zero(),
+        Vector2(100, 0),
+        Vector2(50, 11),
+        10,
+      ),
+      isNull,
+    );
+    expect(
+      GameCore.segmentCircleContact(
+        Vector2(50, 8),
+        Vector2(100, 8),
+        Vector2(50, 8),
+        10,
+      )!.$1,
+      0,
+    );
+  });
+
+  test('swept projectile hitbox registers an enemy crossing its path', () {
+    final contact = GameCore.movingCircleContact(
+      Vector2.zero(),
+      Vector2(100, 0),
+      Vector2(50, 20),
+      Vector2(50, -20),
+      5,
+    );
+
+    expect(contact, isNotNull);
+    final contactFraction = contact!.$1;
+    final bulletPosition = contact.$2;
+    final targetPosition = Vector2(50, 20 - 40 * contactFraction);
+    expect(contactFraction, closeTo(0.4536, 0.0001));
+    expect(bulletPosition.x, closeTo(100 * contactFraction, 0.0001));
+    expect(bulletPosition.distanceTo(targetPosition), closeTo(5, 0.0001));
+  });
+
   test('an unattended pilot can be overwhelmed by an ascension wave', () {
     final game = GameCore(onSave: (wallet, levels, threatTier) async {});
     game.restoreProgress(0, {}, threatTier: 5);

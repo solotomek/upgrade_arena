@@ -73,11 +73,6 @@ class GameSnapshot {
   }
 }
 
-void _damageEnemy(_Enemy enemy, double amount) {
-  enemy.health -= amount;
-  enemy.hitFlash = 0.18;
-}
-
 class GameCore extends FlameGame with KeyboardEvents {
   GameCore({required this.onSave, this.onIntroSeen, bool showIntro = false})
     : _phase = showIntro ? RunPhase.intro : RunPhase.title {
@@ -531,10 +526,11 @@ class GameCore extends FlameGame with KeyboardEvents {
             .distanceTo(_player)
             .compareTo(second.position.distanceTo(_player)),
       );
-    final target = targets.firstWhere(
-      (enemy) => _hasClearShot(_player, enemy.position),
-      orElse: () => targets.first,
-    );
+    final visibleTargets = targets
+        .where((enemy) => _hasClearShot(_player, enemy.position))
+        .toList();
+    if (visibleTargets.isEmpty) return;
+    final target = visibleTargets.first;
     final aimProjectileSpeed = _weaponProjectileSpeed(currentWeapon);
     final flightTime =
         (target.position.distanceTo(_player) / aimProjectileSpeed)
@@ -611,6 +607,7 @@ class GameCore extends FlameGame with KeyboardEvents {
       for (final enemy in _enemies) enemy: enemy.position.clone(),
     };
     for (final enemy in _enemies) {
+      enemy.previousPosition.setFrom(enemy.position);
       enemy.velocity.setZero();
       final towardPlayer = _player - enemy.position;
       final distance = towardPlayer.length;
@@ -1000,17 +997,27 @@ class GameCore extends FlameGame with KeyboardEvents {
 
       var firstEnemyContactT = double.infinity;
       Vector2? firstEnemyContactPosition;
+      _Enemy? firstEnemyHit;
       for (final enemy in _enemies) {
         if (defeatedEnemies.contains(enemy)) continue;
-        final enemyContact = _segmentCircleContact(
-          previousPosition,
-          segmentEnd,
-          enemy.position,
-          enemy.radius + 4,
-        );
+        final enemyContact = contact == null
+            ? movingCircleContact(
+                previousPosition,
+                segmentEnd,
+                enemy.previousPosition,
+                enemy.position,
+                enemy.radius + 4,
+              )
+            : segmentCircleContact(
+                previousPosition,
+                segmentEnd,
+                enemy.position,
+                enemy.radius + 4,
+              );
         if (enemyContact != null && enemyContact.$1 < firstEnemyContactT) {
           firstEnemyContactT = enemyContact.$1;
           firstEnemyContactPosition = enemyContact.$2;
+          firstEnemyHit = enemy;
           impacted = true;
         }
       }
@@ -1026,15 +1033,9 @@ class GameCore extends FlameGame with KeyboardEvents {
               if (enemy.health <= 0) defeatedEnemies.add(enemy);
             }
           }
-        } else {
-          for (final enemy in _enemies) {
-            if (detonationPoint.distanceTo(enemy.position) <=
-                enemy.radius + 4) {
-              _damageEnemy(enemy, bullet.damage);
-              if (enemy.health <= 0) defeatedEnemies.add(enemy);
-              break;
-            }
-          }
+        } else if (firstEnemyHit != null) {
+          _damageEnemy(firstEnemyHit, bullet.damage);
+          if (firstEnemyHit.health <= 0) defeatedEnemies.add(firstEnemyHit);
         }
       }
     }
@@ -1054,6 +1055,11 @@ class GameCore extends FlameGame with KeyboardEvents {
     }
   }
 
+  void _damageEnemy(_Enemy enemy, double amount) {
+    enemy.health -= amount;
+    enemy.hitFlash = 0.18;
+  }
+
   Vector2? _firstObstacleContact(Vector2 start, Vector2 end, double radius) {
     final delta = end - start;
     final steps = math.max(1, (delta.length / 4).ceil());
@@ -1064,24 +1070,46 @@ class GameCore extends FlameGame with KeyboardEvents {
     return null;
   }
 
-  (double, Vector2)? _segmentCircleContact(
+  static (double, Vector2)? segmentCircleContact(
     Vector2 start,
     Vector2 end,
     Vector2 center,
     double radius,
   ) {
     final delta = end - start;
+    final offset = start - center;
     final lengthSquared = delta.length2;
-    final t = lengthSquared == 0
-        ? 0.0
-        : ((center - start).dot(delta) / lengthSquared).clamp(0, 1).toDouble();
-    final closest = start + delta * t;
-    if (closest.distanceTo(center) > radius) return null;
-    final length = delta.length;
-    final entryT = length == 0
-        ? 0.0
-        : (t - radius / length).clamp(0, 1).toDouble();
-    return (entryT, start + delta * entryT);
+    if (lengthSquared == 0) {
+      return offset.length2 <= radius * radius ? (0, start.clone()) : null;
+    }
+
+    final projection = offset.dot(delta);
+    final constant = offset.length2 - radius * radius;
+    if (constant <= 0) return (0, start.clone());
+    final discriminant = projection * projection - lengthSquared * constant;
+    if (discriminant < 0) return null;
+
+    final t = (-projection - math.sqrt(discriminant)) / lengthSquared;
+    if (t < 0 || t > 1) return null;
+    return (t, start + delta * t);
+  }
+
+  static (double, Vector2)? movingCircleContact(
+    Vector2 start,
+    Vector2 end,
+    Vector2 circleStart,
+    Vector2 circleEnd,
+    double radius,
+  ) {
+    final relativeContact = segmentCircleContact(
+      start - circleStart,
+      end - circleEnd,
+      Vector2.zero(),
+      radius,
+    );
+    if (relativeContact == null) return null;
+    final t = relativeContact.$1;
+    return (t, start + (end - start) * t);
   }
 
   void _moveEnemyBullets(double dt) {
@@ -1099,7 +1127,7 @@ class GameCore extends FlameGame with KeyboardEvents {
         spentBullets.add(bullet);
         continue;
       }
-      final playerContact = _segmentCircleContact(
+      final playerContact = segmentCircleContact(
         previousPosition,
         bullet.position,
         _player,
@@ -2207,10 +2235,12 @@ class _Enemy {
     required this.elite,
     required this.type,
     this.boss = false,
-  }) : attackCooldown = boss ? 2.2 : 0.6,
+  }) : previousPosition = position.clone(),
+       attackCooldown = boss ? 2.2 : 0.6,
        chargeCooldown = type == _EnemyType.charger ? 1.6 : 0;
 
   final Vector2 position;
+  final Vector2 previousPosition;
   final double radius;
   final double maxHealth;
   final double speed;
